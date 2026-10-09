@@ -1,0 +1,13 @@
+# Secrets: never commit real tokens and keys (.env.example stays tracked)
+.env
+
+# Local database (tasks and chat history)
+data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Python
+.venv/
+__pycache__/
+*.pyc
