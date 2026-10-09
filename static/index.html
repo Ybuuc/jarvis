@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827"><meta name="description" content="Личный ИИ-помощник и доска задач">
+  <link rel="manifest" href="/manifest.webmanifest"><link rel="stylesheet" href="/style.css">
+  <title>Личный помощник</title>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">✦</span><span>Помощник</span></div>
+      <nav><button class="nav-item selected" data-view="overview">◫ <span>Обзор</span></button><button class="nav-item" data-view="tasks">▤ <span>Задачи</span></button><button class="nav-item" data-view="chat">✧ <span>Чат с ИИ</span></button></nav>
+      <div class="sidebar-bottom"><div class="connection"><i></i><span>Общие данные</span></div><button id="settingsBtn" class="quiet">⚙ Настройки доступа</button></div>
+    </aside>
+    <main>
+      <header><div><div class="eyebrow" id="todayLabel"></div><h1 id="pageTitle">Твой день, под контролем</h1></div><button class="avatar" aria-label="Профиль">Д</button></header>
+      <section id="overviewView" class="view">
+        <div class="hero"><div><div class="eyebrow light">ЛИЧНЫЙ ИИ-ПОМОЩНИК</div><h2>Разберёмся<br>со всем по шагам.</h2><p>Запиши задачу — я помогу составить план и не потерять срок.</p><button class="primary" data-goto="chat">Открыть чат <span>↗</span></button></div><div class="orbit"><span>✦</span><b>AI</b><i></i></div></div>
+        <div class="section-head"><div><div class="eyebrow">ТВОЯ ДОСКА</div><h2>Активные задачи <span id="taskCount" class="count">0</span></h2></div><button class="outline" id="newTaskBtn">＋ Новая задача</button></div>
+        <div id="taskBoard" class="board"></div>
+      </section>
+      <section id="tasksView" class="view hidden"><div class="section-head"><div><div class="eyebrow">ПЛАНИРОВАНИЕ</div><h2>Все задачи</h2></div><button class="outline" id="newTaskBtn2">＋ Новая задача</button></div><div id="fullTaskBoard" class="board"></div></section>
+      <section id="chatView" class="view hidden"><div class="chat-panel"><div class="chat-top"><div class="bot-icon">✧</div><div><strong>Твой помощник</strong><small><i></i> готов помочь</small></div><button class="quiet" id="refreshChat">↻</button></div><div id="chatMessages" class="messages"></div><form id="chatForm" class="composer"><textarea id="chatInput" rows="1" placeholder="Напиши вопрос или опиши задачу…"></textarea><button class="send" aria-label="Отправить">↑</button></form><div class="composer-hint">Enter — отправить · Shift + Enter — новая строка</div></div></section>
+    </main>
+  </div>
+  <div id="modal" class="modal hidden"><form id="taskForm" class="dialog"><button type="button" class="close" id="closeModal">×</button><div class="eyebrow">НОВАЯ КАРТОЧКА</div><h2>Добавить задачу</h2><label>Название<input name="title" required maxlength="160" placeholder="Например, закончить лабораторную"></label><label>Описание<textarea name="detail" rows="3" placeholder="Что нужно сделать?"></textarea></label><div class="form-row"><label>Категория<select name="category"><option>Учёба</option><option>Диплом</option><option>Личное</option><option>Проект</option></select></label><label>Срок<input name="deadline" type="datetime-local"></label></div><label>Напомнить начать<input name="remind_at" type="datetime-local"></label><button class="primary full">Сохранить задачу</button></form></div>
+  <div id="toast" class="toast"></div>
+  <script src="/app.js" defer></script>
+</body></html>
