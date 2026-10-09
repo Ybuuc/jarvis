@@ -26,7 +26,7 @@
    pip install -r requirements.txt
    ```
 
-4. Скопируй `.env.example` в `.env` и заполни значения. Для локального запуска переменные нужно экспортировать в терминале или настроить в конфигурации запуска IDE.
+4. Скопируй `.env.example` в `.env` и заполни значения (значения со спецсимволами бери в кавычки). Приложение само файл `.env` не читает, поэтому перед запуском загрузи его в окружение командой `set -a; source .env; set +a` (bash). Обязательна только `APP_ACCESS_TOKEN`; Telegram и Azure OpenAI можно добавить позже. Файл `.env` в `.gitignore` и не должен попадать в репозиторий.
 5. Создай Telegram-бота у `@BotFather`, узнай свой Telegram user ID и заполни `TELEGRAM_BOT_TOKEN` и `TELEGRAM_OWNER_ID`. Напиши боту `/start`.
 6. В Azure создай ресурс Azure OpenAI или модель в Azure AI Foundry, выполни deployment модели и заполни endpoint, key и deployment name.
 7. Запусти приложение:
