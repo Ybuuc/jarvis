@@ -1,6 +1,7 @@
 import hmac
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -121,8 +122,8 @@ def auth_ok():
     return hmac.compare_digest(supplied.encode(), ACCESS_TOKEN.encode())
 
 
-@app.before_request
-def ensure_workers():
+def start_workers():
+    """Start the Telegram poller and reminder loop once per process (idempotent)."""
     global _workers_started
     if _workers_started or not (TELEGRAM_TOKEN and TELEGRAM_OWNER_ID):
         return
@@ -133,6 +134,12 @@ def ensure_workers():
             _workers_started = True
 
 
+@app.before_request
+def ensure_workers():
+    # Safety net only: workers are normally started at import time (bottom of file).
+    start_workers()
+
+
 @app.get("/")
 def home():
     return send_from_directory(STATIC_DIR, "index.html")
@@ -141,6 +148,16 @@ def home():
 @app.get("/manifest.webmanifest")
 def manifest():
     return send_from_directory(STATIC_DIR, "manifest.webmanifest")
+
+
+@app.get("/style.css")
+def stylesheet():
+    return send_from_directory(STATIC_DIR, "style.css", mimetype="text/css")
+
+
+@app.get("/app.js")
+def app_script():
+    return send_from_directory(STATIC_DIR, "app.js", mimetype="application/javascript")
 
 
 @app.get("/sw.js")
@@ -274,6 +291,30 @@ def telegram_send(text):
     telegram_call("sendMessage", {"chat_id": TELEGRAM_OWNER_ID, "text": text[:4000]})
 
 
+STATUS_COMMAND = re.compile(r"^\s*(начал[аи]?|готов[оаы]?|сделал[аи]?)\s*#?\s*(\d+)\s*[.!]?\s*$", re.IGNORECASE)
+
+
+def handle_status_command(text):
+    """Handle «начал #N» / «готово #N» deterministically, without the AI.
+
+    Returns the reply text, or None if the message is not such a command.
+    """
+    match = STATUS_COMMAND.match(text)
+    if not match:
+        return None
+    word, task_id = match.group(1).lower(), int(match.group(2))
+    new_status = "active" if word.startswith("нач") else "done"
+    with db() as con:
+        row = con.execute("SELECT status, title FROM tasks WHERE id=?", (task_id,)).fetchone()
+    if not row:
+        return f"Задача #{task_id} не найдена."
+    if row["status"] == "done" and new_status == "active":
+        return f"Задача #{task_id} «{row['title']}» уже завершена."
+    update_task(task_id, status=new_status)
+    label = "в работе" if new_status == "active" else "готово"
+    return f"Задача #{task_id} «{row['title']}» — {label}."
+
+
 def telegram_poll_loop():
     offset = 0
     while True:
@@ -294,6 +335,8 @@ def telegram_poll_loop():
                 elif text == "/tasks":
                     open_items = [x for x in list_tasks() if x["status"] != "done"]
                     telegram_send("Открытых задач пока нет." if not open_items else "Твои задачи:\n" + "\n".join(f"#{x['id']} · {x['title']} — {x['status']}" for x in open_items))
+                elif (command_reply := handle_status_command(text)) is not None:
+                    telegram_send(command_reply)
                 else:
                     add_message("user", text)
                     try:
@@ -308,6 +351,22 @@ def telegram_poll_loop():
             time.sleep(5)
 
 
+def parse_when(value):
+    """Parse an ISO 8601 string into an aware UTC datetime.
+
+    A value without a UTC offset is interpreted in APP_TIMEZONE, so a naive
+    timestamp can never be compared with an aware one (that raised TypeError).
+    Returns None if the value cannot be parsed.
+    """
+    try:
+        when = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=ZoneInfo(APP_TIMEZONE))
+    return when.astimezone(timezone.utc)
+
+
 def reminder_loop():
     while True:
         try:
@@ -315,20 +374,23 @@ def reminder_loop():
             with db() as con:
                 due = con.execute("SELECT * FROM tasks WHERE status='new' AND remind_at IS NOT NULL AND reminded_at IS NULL").fetchall()
             for row in due:
+                # One bad row (unparsable time, Telegram error) must not block the others.
                 try:
-                    when = datetime.fromisoformat(row["remind_at"].replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-                if when <= now:
+                    when = parse_when(row["remind_at"])
+                    if when is None or when > now:
+                        continue
                     telegram_send(f"Напоминание: задача «{row['title']}» ещё не начата.\nСрок: {row['deadline'] or 'не задан'}\nНапиши «начал #{row['id']}», «готово #{row['id']}» или отложи напоминание на доске.")
                     with db() as con:
                         con.execute("UPDATE tasks SET reminded_at=?, updated_at=? WHERE id=? AND status='new' AND reminded_at IS NULL", (now_iso(), now_iso(), row["id"]))
+                except Exception:
+                    app.logger.exception("Reminder for task %s failed", row["id"])
         except Exception:
             app.logger.exception("Reminder check failed")
         time.sleep(30)
 
 
 init_db()
+start_workers()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), threaded=True)
