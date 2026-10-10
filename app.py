@@ -21,6 +21,13 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+# Any OpenAI-compatible provider (OpenAI, Gemini, Groq, OpenRouter, ...). If all three
+# are set, they are used instead of Azure OpenAI.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").rstrip("/")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "")
+# Some models accept only the default temperature; set AI_TEMPERATURE= (empty) to omit it.
+AI_TEMPERATURE = os.getenv("AI_TEMPERATURE", "0.4")
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Asia/Qyzylorda")
 
 app = Flask(__name__, static_folder=None)
@@ -115,6 +122,21 @@ def update_task(task_id, status=None, deadline=None, remind_at=None, detail=None
     return task_dict(row)
 
 
+def ai_request_config():
+    """Return (provider, url, headers, extra_payload) for the configured AI, or None."""
+    if LLM_BASE_URL and LLM_API_KEY and LLM_MODEL:
+        return ("openai-compatible",
+                f"{LLM_BASE_URL}/chat/completions",
+                {"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+                {"model": LLM_MODEL})
+    if AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY and AZURE_OPENAI_DEPLOYMENT:
+        return ("azure",
+                f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}",
+                {"api-key": AZURE_OPENAI_KEY, "Content-Type": "application/json"},
+                {})
+    return None
+
+
 def auth_ok():
     if not ACCESS_TOKEN:
         return False
@@ -167,7 +189,8 @@ def service_worker():
 
 @app.get("/api/health")
 def health():
-    return jsonify({"ok": True, "ai_configured": bool(AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY and AZURE_OPENAI_DEPLOYMENT), "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_OWNER_ID)})
+    config = ai_request_config()
+    return jsonify({"ok": True, "ai_configured": config is not None, "ai_provider": config[0] if config else None, "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_OWNER_ID)})
 
 
 @app.route("/api/<path:_path>", methods=["GET", "POST", "PATCH", "DELETE"])
@@ -220,8 +243,9 @@ def add_message(role, content):
 
 
 def ai_chat(user_text):
-    if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_KEY and AZURE_OPENAI_DEPLOYMENT):
-        return "ИИ пока не подключён. Добавь Azure OpenAI endpoint, deployment и key в настройки приложения. Задачи при этом можно записывать на доску вручную."
+    config = ai_request_config()
+    if config is None:
+        return "ИИ пока не подключён. Задай настройки провайдера (LLM_BASE_URL, LLM_API_KEY, LLM_MODEL или Azure OpenAI) и перезапусти приложение. Задачи при этом можно записывать на доску вручную."
     with db() as con:
         history = con.execute("SELECT role, content FROM messages ORDER BY id DESC LIMIT 12").fetchall()
     local_now = datetime.now(ZoneInfo(APP_TIMEZONE)).isoformat(timespec="minutes")
@@ -235,10 +259,12 @@ def ai_chat(user_text):
     tools = [{"type": "function", "function": {"name": "create_task", "description": "Создать карточку новой задачи, если пользователь просит записать или сохранить задачу.", "parameters": {"type": "object", "properties": {"title": {"type": "string"}, "detail": {"type": "string"}, "category": {"type": "string"}, "deadline": {"type": "string", "description": "ISO date/time или пустая строка"}, "remind_at": {"type": "string", "description": "ISO date/time или пустая строка"}}, "required": ["title"]}}},
              {"type": "function", "function": {"name": "list_tasks", "description": "Показать задачи пользователя.", "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["new", "active", "waiting", "review", "done", ""]}}}}},
              {"type": "function", "function": {"name": "update_task", "description": "Поменять статус задачи. Используй active только если пользователь явно начал работу.", "parameters": {"type": "object", "properties": {"task_id": {"type": "integer"}, "status": {"type": "string", "enum": ["new", "active", "waiting", "review", "done"]}}, "required": ["task_id", "status"]}}}]
-    url = f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{AZURE_OPENAI_DEPLOYMENT}/chat/completions?api-version={AZURE_OPENAI_API_VERSION}"
-    headers = {"api-key": AZURE_OPENAI_KEY, "Content-Type": "application/json"}
+    _provider, url, headers, extra_payload = config
     for _ in range(3):
-        response = requests.post(url, headers=headers, json={"messages": messages, "tools": tools, "tool_choice": "auto", "temperature": 0.4}, timeout=45)
+        payload = {"messages": messages, "tools": tools, "tool_choice": "auto", **extra_payload}
+        if AI_TEMPERATURE.strip():
+            payload["temperature"] = float(AI_TEMPERATURE)
+        response = requests.post(url, headers=headers, json=payload, timeout=45)
         response.raise_for_status()
         result = response.json()["choices"][0]["message"]
         calls = result.get("tool_calls") or []
@@ -256,7 +282,7 @@ def ai_chat(user_text):
                 output = update_task(args.get("task_id"), args.get("status")) or {"error": "Задача не найдена"}
             else:
                 output = {"error": "Неизвестная команда"}
-            messages.append({"role": "tool", "tool_call_id": call["id"], "content": json.dumps(output, ensure_ascii=False)})
+            messages.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": json.dumps(output, ensure_ascii=False)})
     return "Выполнил действие. Что ещё сделать?"
 
 
@@ -273,7 +299,7 @@ def api_chat():
         answer = ai_chat(text)
     except Exception as exc:
         app.logger.exception("AI request failed")
-        answer = "Не удалось связаться с ИИ. Проверь Azure OpenAI settings и попробуй ещё раз."
+        answer = "Не удалось связаться с ИИ. Проверь настройки ИИ-провайдера и попробуй ещё раз."
     add_message("assistant", answer)
     return jsonify({"answer": answer})
 
