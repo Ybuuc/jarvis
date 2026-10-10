@@ -7,6 +7,7 @@ No network, no real Telegram/Azure credentials: everything external is stubbed
 and each test uses its own temporary SQLite file.
 """
 import importlib.util
+import json
 import os
 import re
 import tempfile
@@ -34,6 +35,10 @@ def load_app(env=None):
         "AZURE_OPENAI_ENDPOINT": "",
         "AZURE_OPENAI_KEY": "",
         "AZURE_OPENAI_DEPLOYMENT": "",
+        "LLM_BASE_URL": "",
+        "LLM_API_KEY": "",
+        "LLM_MODEL": "",
+        "AI_TEMPERATURE": "0.4",
         "APP_TIMEZONE": "Asia/Qyzylorda",
     }
     base_env.update(env or {})
@@ -237,6 +242,93 @@ class TelegramCommandTests(unittest.TestCase):
         self.assertEqual(mod.list_tasks()[0]["status"], "active", "stranger's message must be ignored")
         self.assertEqual(len(sent), 1)
         self.assertIn("в работе", sent[0])
+
+
+class FakeResponse:
+    def __init__(self, message):
+        self._message = message
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"choices": [{"message": self._message}]}
+
+
+def tool_call_message(name, arguments, call_id="call_1"):
+    call = {"type": "function", "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}}
+    if call_id is not None:
+        call["id"] = call_id
+    return {"role": "assistant", "content": None, "tool_calls": [call]}
+
+
+LLM_ENV = {"LLM_BASE_URL": "https://example.test/v1/", "LLM_API_KEY": "secret-key", "LLM_MODEL": "some-model"}
+AZURE_ENV = {"AZURE_OPENAI_ENDPOINT": "https://az.test/", "AZURE_OPENAI_KEY": "az-key", "AZURE_OPENAI_DEPLOYMENT": "dep"}
+
+
+class AiProviderTests(unittest.TestCase):
+    def run_chat(self, env, responses):
+        mod = load_app(env)
+        with mock.patch.object(mod.requests, "post", side_effect=[FakeResponse(r) for r in responses]) as post:
+            answer = mod.ai_chat("Запиши задачу")
+        return mod, post, answer
+
+    def test_not_configured(self):
+        mod = load_app()
+        self.assertIn("ИИ пока не подключён", mod.ai_chat("привет"))
+        health = mod.app.test_client().get("/api/health").get_json()
+        self.assertFalse(health["ai_configured"])
+        self.assertIsNone(health["ai_provider"])
+
+    def test_openai_compatible_provider_request_and_tool_loop(self):
+        mod, post, answer = self.run_chat(LLM_ENV, [
+            tool_call_message("create_task", {"title": "Сдать лабораторную"}),
+            {"role": "assistant", "content": "Записал."},
+        ])
+        self.assertEqual(answer, "Записал.")
+        self.assertEqual([t["title"] for t in mod.list_tasks()], ["Сдать лабораторную"])
+        first = post.call_args_list[0]
+        self.assertEqual(first.args[0], "https://example.test/v1/chat/completions")
+        self.assertEqual(first.kwargs["headers"]["Authorization"], "Bearer secret-key")
+        self.assertNotIn("api-key", first.kwargs["headers"])
+        self.assertEqual(first.kwargs["json"]["model"], "some-model")
+        self.assertEqual(first.kwargs["json"]["temperature"], 0.4)
+        self.assertTrue(first.kwargs["json"]["tools"])
+        health = mod.app.test_client().get("/api/health").get_json()
+        self.assertEqual((health["ai_configured"], health["ai_provider"]), (True, "openai-compatible"))
+
+    def test_azure_request_is_unchanged(self):
+        mod, post, answer = self.run_chat(AZURE_ENV, [{"role": "assistant", "content": "Привет"}])
+        self.assertEqual(answer, "Привет")
+        call = post.call_args_list[0]
+        self.assertEqual(call.args[0], "https://az.test/openai/deployments/dep/chat/completions?api-version=2024-10-21")
+        self.assertEqual(call.kwargs["headers"]["api-key"], "az-key")
+        self.assertNotIn("model", call.kwargs["json"])
+        self.assertEqual(mod.app.test_client().get("/api/health").get_json()["ai_provider"], "azure")
+
+    def test_generic_provider_takes_priority_over_azure(self):
+        _mod, post, _answer = self.run_chat({**AZURE_ENV, **LLM_ENV}, [{"role": "assistant", "content": "ok"}])
+        self.assertTrue(post.call_args_list[0].args[0].startswith("https://example.test/v1/"))
+
+    def test_incomplete_generic_settings_fall_back_to_azure(self):
+        env = {**AZURE_ENV, "LLM_BASE_URL": "https://example.test/v1", "LLM_API_KEY": "k"}  # no LLM_MODEL
+        _mod, post, _answer = self.run_chat(env, [{"role": "assistant", "content": "ok"}])
+        self.assertTrue(post.call_args_list[0].args[0].startswith("https://az.test/"))
+
+    def test_temperature_is_configurable_and_can_be_omitted(self):
+        _m, post, _a = self.run_chat({**LLM_ENV, "AI_TEMPERATURE": ""}, [{"role": "assistant", "content": "ok"}])
+        self.assertNotIn("temperature", post.call_args_list[0].kwargs["json"])
+        _m, post, _a = self.run_chat({**LLM_ENV, "AI_TEMPERATURE": "1"}, [{"role": "assistant", "content": "ok"}])
+        self.assertEqual(post.call_args_list[0].kwargs["json"]["temperature"], 1.0)
+
+    def test_tool_call_without_id_does_not_crash(self):
+        mod, post, answer = self.run_chat(LLM_ENV, [
+            tool_call_message("create_task", {"title": "Без id"}, call_id=None),
+            {"role": "assistant", "content": "Готово"},
+        ])
+        self.assertEqual(answer, "Готово")
+        tool_messages = [m for m in post.call_args_list[1].kwargs["json"]["messages"] if m["role"] == "tool"]
+        self.assertEqual(tool_messages[0]["tool_call_id"], "")
 
 
 if __name__ == "__main__":
